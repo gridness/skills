@@ -33,3 +33,5 @@ In addition to pr body always add `closes #<issue-number>` at the end as the new
 ## Notes
 
 - Usage of `gh` cli might be blocked due to sandboxing. Always ask for approval to run `gh` commands.
+- If there is nothing to commit, check the remote branch. If commit is not present in origin, push the branch and proceed with the procedure.
+- If branch is on the remote and already up to date, explicitly tell the user about it and ask if he wants to just do the PR to default branch.
