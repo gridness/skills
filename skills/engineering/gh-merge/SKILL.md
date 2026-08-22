@@ -19,3 +19,9 @@ When work is complete, follow through the remote update procedure.
 7. Enable auto-merge:
    `gh pr merge --auto --squash`
 8. Report PR URL and CI status.
+
+## Stacked PRs
+
+If merging to main requires merging multiple PRs, use GitHub Stacked Pull Requests: `gh stack`.
+
+If a PR stack is available or created, use `gh stack merge` to merge it.
