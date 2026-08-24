@@ -8,6 +8,16 @@ disable-model-invocation: true
 
 When work is complete, follow through the remote update procedure.
 
+## Before you start
+
+Check if the repository uses [release-please](https://github.com/googleapis/release-please) for releases automations.
+
+If repository uses release-please, adjust the title of PR so release-please correctly parses it.
+
+Before making a PR, estimate changes made. Ask the user what type of version bump he wants. Suggest your recommendation based on chages.
+
+Before user gives you an explicit confrimation, you are not allowed to proceed further.
+
 ## Procedure
 
 1. Check git status and diff.
