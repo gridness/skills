@@ -1,0 +1,5 @@
+interface:
+  display_name: "XCode App Screenshot Test"
+  short_description: "Take a proper screenshot from XCode application without interrupting the user or messing with screen appearence order on the screen"
+policy:
+  allow_implicit_invocation: true
