@@ -1,0 +1,5 @@
+interface:
+  display_name: "Create Rust project"
+  short_description: "Bootstraps rust project in the specified direcotry, including optional GitHub setup"
+policy:
+  allow_implicit_invocation: false
