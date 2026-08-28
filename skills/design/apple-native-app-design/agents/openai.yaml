@@ -1,0 +1,4 @@
+interface:
+  display_name: "Apple-Native App Design"
+  short_description: "Design deeply native Apple ecosystem apps"
+  default_prompt: "Use $apple-native-app-design to interrogate my app idea and design a native macOS-first experience."
