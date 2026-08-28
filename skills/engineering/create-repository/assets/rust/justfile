@@ -1,0 +1,35 @@
+set working-directory := "crates"
+set positional-arguments
+
+help:
+	just -l
+
+run *args:
+	cargo run --bin {{ crate_name }} -- {{ args }}
+
+fmt:
+	cargo fmt --all
+
+fix *args:
+	cargo clippy --fix --workspace --all-targets --allow-dirty {{ args }}
+
+clippy *args:
+	cargo clippy --workspace --all-targets {{ args }} -- -D warnings
+
+test *args:
+	cargo test --workspace --no-fail-fast {{ args }}
+
+check:
+	cargo check --workspace
+
+build:
+	cargo build --workspace
+
+build-release:
+	cargo build --workspace --release
+
+deny:
+	cargo deny check
+
+clean:
+	cargo clean

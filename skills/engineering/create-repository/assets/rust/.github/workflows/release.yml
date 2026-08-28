@@ -1,0 +1,321 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-pr:
+    name: Update release PR
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      created: ${{ steps.release.outputs.prs_created }}
+      number: ${{ steps.pr.outputs.number }}
+      ref: ${{ steps.pr.outputs.ref }}
+
+    steps:
+      - name: Mint release App token
+        id: release-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.release-app-token.outputs.token }}
+          skip-github-release: true
+
+      - name: Read release PR
+        if: steps.release.outputs.prs_created == 'true'
+        id: pr
+        env:
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          echo "number=$(jq -r '.number' <<<"$RELEASE_PR")" >> "$GITHUB_OUTPUT"
+          echo "ref=$(jq -r '.headBranchName' <<<"$RELEASE_PR")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          ref: ${{ steps.pr.outputs.ref }}
+          token: ${{ steps.release-app-token.outputs.token }}
+
+      - name: Update Cargo lockfile
+        if: steps.release.outputs.prs_created == 'true'
+        run: |
+          cargo check -p {{ crate_name }}
+          git add Cargo.lock
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "chore: updated Cargo.lock"
+          git push
+
+  validate-release-pr:
+    name: Validate ${{ matrix.target }}
+    needs: release-pr
+    if: needs.release-pr.outputs.created == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            test: true
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            test: false
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            test: false
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-pr.outputs.ref }}
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Test
+        if: matrix.test
+        run: cargo test --locked --workspace --no-fail-fast
+
+      - name: Build
+        run: cargo build --locked --release --bin {{ crate_name }} --target ${{ matrix.target }}
+
+      - name: Smoke test
+        if: matrix.test
+        run: target/${{ matrix.target }}/release/{{ crate_name }} --version
+
+  merge-release-pr:
+    name: Enable release PR auto-merge
+    needs: [release-pr, validate-release-pr]
+    if: >-
+      ${{ always() && needs.release-pr.outputs.created == 'true' &&
+      needs.validate-release-pr.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Mint release App token
+        id: release-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          PR_NUMBER: ${{ needs.release-pr.outputs.number }}
+        run: gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --auto --squash
+
+  detect-release:
+    name: Detect version bump
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Read version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "release=false" >> "$GITHUB_OUTPUT"
+          current="$(jq -r '.["."] // empty' .release-please-manifest.json)"
+          previous=""
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            previous="$(git show HEAD^:.release-please-manifest.json 2>/dev/null | jq -r '.["."] // empty' || true)"
+          fi
+          if [[ -z "$current" ]]; then
+            exit 0
+          fi
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "{{ crate_name }}") | .version')"
+          file_version="$(tr -d '[:space:]' <version.txt)"
+          if ! [[ "$current" == "$cargo_version" && "$current" == "$file_version" ]]; then
+            echo "Release Please ($current), Cargo ($cargo_version), and version.txt ($file_version) differ" >&2
+            exit 1
+          fi
+          if [[ "$current" == "$previous" ]] &&
+            [[ "$(gh release view "v$current" --repo "$GITHUB_REPOSITORY" --json isDraft --jq 'select(.isDraft == false) | .isDraft' 2>/dev/null || true)" == false ]]; then
+            exit 0
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+
+  test-release:
+    name: Test release
+    needs: detect-release
+    if: needs.detect-release.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo test --locked --workspace --no-fail-fast
+
+  build-release:
+    name: Build ${{ matrix.target }}
+    needs: detect-release
+    if: needs.detect-release.outputs.release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.detect-release.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --locked --release --bin {{ crate_name }} --target "$TARGET"
+
+      - name: Package
+        run: |
+          install -d dist/package
+          install -m 755 "target/$TARGET/release/{{ crate_name }}" dist/package/{{ crate_name }}
+          install -m 644 LICENSE dist/package/LICENSE
+          tar -C dist/package -czf "dist/{{ crate_name }}-v$VERSION-$TARGET.tar.gz" {{ crate_name }} LICENSE
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/{{ crate_name }}-v*
+          if-no-files-found: error
+
+  publish-github:
+    name: Publish GitHub release
+    needs: [detect-release, test-release, build-release]
+    if: >-
+      ${{ needs.detect-release.outputs.release == 'true' &&
+      needs.test-release.result == 'success' &&
+      needs.build-release.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      TAG: v${{ needs.detect-release.outputs.version }}
+
+    steps:
+      - name: Mint release App token
+        id: release-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Check for existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create draft release
+        if: steps.existing.outputs.release != 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.release-app-token.outputs.token }}
+          skip-github-pull-request: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Write checksums
+        run: |
+          cd dist
+          sha256sum {{ crate_name }}-*.tar.gz >SHA256SUMS
+
+      - name: Attest release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
